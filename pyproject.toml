@@ -1,6 +1,6 @@
 [project]
 name = "variantrc"
-version = "0.1.0"
+version = "0.1.1"
 authors = [
     {name = "Michael Kaufman", email = "mlkaufman@gmail.com"},
 ]

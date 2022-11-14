@@ -5,7 +5,6 @@ import typer
 from rich import print
 
 from collections import Counter
-from email.mime import base
 
 import pandas as pd
 import pysam
@@ -32,6 +31,8 @@ matplotlib.rcParams["axes.labelweight"] = "bold"
 
 # feature ideas
 # choose the number of strains or which strains to use
+# multi processing
+# html report
 
 ### Read Classification Resolver Function
 def read_resolver(
@@ -253,13 +254,15 @@ def read_classification(
     print("\nLoading reads to classify..." + bamfile_path)
     bamfile = pysam.AlignmentFile(bamfile_path, "rb")
     bamfile_name = bamfile_path.split("/")[-1].split(".")[0]
-
+    
     # load variants
     print("Loading variants..." + variantfile_path)
 
+    variantfile_name = variantfile_path.split("/")[-1].split(".")[0]
     variantfile = pysam.VariantFile(variantfile_path)
     num_vcf_samples = len(str(variantfile.header).split("FORMAT\t")[1].split("\t"))
     vcf_sample_names = str(variantfile.header).split("FORMAT\t")[1].split("\t")
+
 
     print("\n")
     print("Number of samples in VCF: " + str(num_vcf_samples))
@@ -627,20 +630,22 @@ def read_classification(
     ### Save to CSV
     if save_variants:
         print("\nSaving..." + bamfile_name + ".csv")
-        df_summary.to_csv(output_path + bamfile_name + ".csv")  # save to CSV
+        df_summary.to_csv(output_path + bamfile_name + "_" + variantfile_name + ".csv")  # save to CSV
 
+    ### Save figure image
     if save_figures:
         print("\nSaving..." + bamfile_name + ".png")
         plot = df_summary.read_result.value_counts().plot(
-            kind="bar", title=bamfile_name + " Read Results"
+            kind="bar", title=bamfile_name + " Read Results\n" + variantfile_name
         )
         plot.figure.savefig(
-            output_path + bamfile_name + ".png", bbox_inches="tight"
+            output_path + bamfile_name + "_" + variantfile_name + ".png", bbox_inches="tight"
         )  # save to PNG
 
 
 if __name__ == "__main__":
 
+    # 
     variantfile_path = "vcfs/variant_calls_3strains_annotated_exons.vcf.gz"
 
     bamfile_path1 = "bams/cantons_sorted_subset.bam"
@@ -659,7 +664,7 @@ if __name__ == "__main__":
         )
 
     ### Read Sorting Function Testing
-    read_sorting(bamfile, variantfile_path, dict_gene_lookup)
+    read_classification(bamfile, variantfile_path, dict_gene_lookup)
 
     df_readcalls = pd.read_csv(bamfile + ".csv")
 

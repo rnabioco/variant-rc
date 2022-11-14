@@ -15,7 +15,7 @@ Requires: Python >=3.8, pip or pipx
 The prefered method of installation into an isolated python enviroment using pipx:
 (<https://pypa.github.io/pipx/>)
 
-<b> Using pipx: </b>
+**Using pipx:**
 
 Install pipx if necessary:
 
@@ -25,11 +25,11 @@ use pipx to install directly from this github repo:
 
 `pipx install git+https://github.com/rnabioco/variant-rc.git`
 
-<b> Using vanilla pip: </b>
+**Using vanilla pip:**
 
 `pip install git+https://github.com/rnabioco/variant-rc.git`
 
-<b> Notes: </b>
+**Notes:**
 
 Installation creates a systemwide `variant-rc` command.
 
@@ -48,3 +48,10 @@ Read Classification:
 `variant-rc <bamfile> <vcf-file>`
 
 ![img](screenshot2.png)
+
+## Outputs
+
+Variant-RC currently outputs two formats:
+
+* Dataframe containing all read level information as a CSV file
+* PNG plot of classification results
