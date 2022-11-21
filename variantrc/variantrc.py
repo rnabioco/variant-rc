@@ -42,6 +42,8 @@ def read_resolver(
     list_variant_confidence,
     mapq_threshold=20,
     base_quality_threshold=9,
+    strain1 = "strain1",
+    strain2 = "strain2",
 ):
     list_possible_results = list_read_results.copy()
 
@@ -55,8 +57,8 @@ def read_resolver(
             len(set(list_possible_results)) > 1
             and read_result != "mixed post filter"
             and read_result != "not determined"
-            and read_result != "strain1"
-            and read_result != "strain2"
+            and read_result != strain1
+            and read_result != strain2
             and read_result != "strain3"
         ):
             # print( "1", list_possible_results)
@@ -161,8 +163,8 @@ def read_resolver(
             # resolve multiple possible strain calls
             if len(set(list_possible_results)) >= 2:
 
-                num_strain1 = list_possible_results.count("strain1")
-                num_strain2 = list_possible_results.count("strain2")
+                num_strain1 = list_possible_results.count(strain1)
+                num_strain2 = list_possible_results.count(strain2)
                 num_strain3 = list_possible_results.count("strain3")
                 num_reference = list_possible_results.count("reference")
                 per_strain1 = num_strain1 / (
@@ -204,10 +206,10 @@ def read_resolver(
                         read_result = "mixed strain"
                         break
                     elif per_strain1 >= 0.5:
-                        read_result = "strain1"
+                        read_result = strain1
                         break
                     elif per_strain2 >= 0.5:
-                        read_result = "strain2"
+                        read_result = strain2
                         break
                     elif per_strain3 >= 0.5:
                         read_result = "strain3"
@@ -263,6 +265,10 @@ def read_classification(
     num_vcf_samples = len(str(variantfile.header).split("FORMAT\t")[1].split("\t"))
     vcf_sample_names = str(variantfile.header).split("FORMAT\t")[1].split("\t")
 
+    # load the strain names for plotting
+    strain1 = vcf_sample_names[0].split(".")[0]
+    strain2 = vcf_sample_names[1].split(".")[0]
+    
 
     print("\n")
     print("Number of samples in VCF: " + str(num_vcf_samples))
@@ -455,12 +461,12 @@ def read_classification(
                                         break
 
                                     elif match_result in genotype1:
-                                        variant_result = "strain1"
+                                        variant_result = strain1
                                         read_sequence = indel_construct
                                         break
 
                                     elif match_result in genotype2:
-                                        variant_result = "strain2"
+                                        variant_result = strain2
                                         read_sequence = indel_construct
                                         break
 
@@ -498,11 +504,11 @@ def read_classification(
                                     variant_confidence += 0.25
 
                                 elif base_genotype_at_variant in genotype1:
-                                    variant_result = "strain1"
+                                    variant_result = strain1
                                     variant_confidence += 0.25
 
                                 elif base_genotype_at_variant in genotype2:
-                                    variant_result = "strain2"
+                                    variant_result = strain2
                                     variant_confidence += 0.25
 
                                 elif base_genotype_at_variant in genotype3:
@@ -565,6 +571,8 @@ def read_classification(
                 list_variant_confidence,
                 mapq_threshold,
                 base_quality_threshold,
+                strain1=strain1,
+                strain2=strain2
             )
 
         elif variant_num == 0 and read_result == "":
