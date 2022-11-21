@@ -271,7 +271,6 @@ def read_classification(
 
     ### Session level stats
     df_summary = pd.DataFrame()
-    sorted_reads = []  # processed reads
     read_count = 0  # number of reads
 
     print("\nClassifying " + bamfile_name + "...")
@@ -636,7 +635,7 @@ def read_classification(
     if save_figures:
         print("\nSaving..." + bamfile_name + ".png")
         plot = df_summary.read_result.value_counts().plot(
-            kind="bar", title=bamfile_name + " Read Results\n" + variantfile_name
+            kind="bar", title="Reads Classified: " + bamfile_name + "\nVariants:" + variantfile_name
         )
         plot.figure.savefig(
             output_path + bamfile_name + "_" + variantfile_name + ".png", bbox_inches="tight"
@@ -673,7 +672,7 @@ if __name__ == "__main__":
     print(df_readcalls.read_result.value_counts())
 
     df_readcalls.read_result.value_counts().plot(
-        kind="bar", title=bamfile_name + " Read Results"
+        kind="bar", title="Reads Classified: " + bamfile_name
     )
     plt.xticks(rotation=45)
     plt.savefig(bamfile_name + "_read_results.png")
