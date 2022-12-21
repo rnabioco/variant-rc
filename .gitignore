@@ -1,5 +1,7 @@
 # project specific
-
+<<<<<<< HEAD
+=======
+>>>>>>> origin/multiprocessing
 /classification_results/
 /test_data/
 .DS_Store

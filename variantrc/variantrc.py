@@ -4,6 +4,9 @@ from types import NoneType
 import typer
 from rich import print
 
+import multiprocessing
+from multiprocessing import Pool
+
 from collections import Counter
 
 import pandas as pd
@@ -15,7 +18,6 @@ if __name__ == "variantrc.variantrc" or __name__ == "__main__":
     from tqdm import tqdm
 else:
     from tqdm.notebook import tqdm  # progress bar
-
 
 import matplotlib
 from matplotlib import pyplot as plt
@@ -31,8 +33,10 @@ matplotlib.rcParams["axes.labelweight"] = "bold"
 
 # feature ideas
 # choose the number of strains or which strains to use
-# multi processing
+# multi processing by chunking read.query_name and allowing each process to access bamfile with multipleiterators = True
 # html report
+# species specific gene information
+
 
 ### Read Classification Resolver Function
 def read_resolver(
@@ -42,8 +46,8 @@ def read_resolver(
     list_variant_confidence,
     mapq_threshold=20,
     base_quality_threshold=9,
-    strain1 = "strain1",
-    strain2 = "strain2",
+    strain1="strain1",
+    strain2="strain2",
 ):
     list_possible_results = list_read_results.copy()
 
@@ -237,6 +241,367 @@ def read_resolver(
     return read_result
 
 
+def process_read(
+    read_str,
+    bam_header,
+    variantfile_path,
+    mapq_threshold,
+    base_quality_threshold,
+    strain1,
+    strain2,
+    read_count,
+):
+    """Process a read to determine if it is strain specific."""
+    variant_num = 0  # reset variant count
+    variantfile = pysam.VariantFile(variantfile_path)
+    num_vcf_samples = len(str(variantfile.header).split("FORMAT\t")[1].split("\t"))
+    dict_gene_lookup = {}  # reset gene lookup
+
+    # reset read level stats
+    read_result = ""  # reset read result
+    result_confidence = -1  # confidence of read result
+    read_sequence = ""  # reset read sequence
+    genotype1 = ""  # reset genotype1
+    genotype2 = ""  # reset genotype2
+    genotype3 = ""  # reset genotype3
+
+    ### Read level data
+    list_variant_refseq = []
+    list_read_results = []
+    list_variant_alleles = []
+    list_genotype1 = []
+    list_genotype2 = []
+    list_genotype3 = []
+    list_isindel = []
+    list_genes = []
+    list_symbols = []
+    list_variantpos = []
+    list_variant_posqual = []
+    list_variant_confidence = []
+
+    # convert string back to read
+    read = pysam.AlignedSegment.fromstring(
+        read_str, pysam.AlignmentHeader.from_dict(bam_header)
+    )
+
+    if (
+        int(read.mapping_quality) > mapq_threshold
+    ):  # filter for overall read map quality # check presecense of read.qual or read.get_forward_qualities()?
+
+        # generate the read level lookup dictionaries for base position and quality
+        read_index = {}  # read base lookup dictionary
+        mapping_quality = {}  # read base level mapping quality lookup dictionary
+
+        for index, position in read.aligned_pairs:
+            if index is not None and position is not None:
+                read_index[position] = read.seq[int(index)]
+                mapping_quality[position] = read.get_forward_qualities()[index]
+
+        # fetch 1-base position variants found within the read sequence
+        for variant in variantfile.fetch(
+            contig=read.reference_name,
+            start=read.reference_start,
+            stop=read.reference_end,
+        ):
+
+            variant_position = variant.pos - 1  # fix the off by one error
+            variant_result = "none"  # reset result
+            variant_confidence = 0
+
+            if "INDEL" in variant.info.keys():
+                is_indel = True
+            else:
+                is_indel = False
+
+            if "GENE" in variant.info.keys():
+                list_genes.append(variant.info["GENE"])
+
+                try:
+                    list_symbols.append(
+                        dict_gene_lookup[variant.info["GENE"]]
+                    )  # translate gene name to symbol
+                except KeyError:
+                    list_symbols.append(
+                        variant.info["GENE"]
+                    )  # if no symbol found, use gene name
+            else:
+                list_genes.append("-")  # if no gene found in key(), use '-'
+                list_symbols.append("-")
+
+            if variant_position in read_index.keys():
+                variant_num += 1
+                list_variant_posqual.append(
+                    mapping_quality[variant_position]
+                )  # keep track of the read base quality
+
+                if (
+                    mapping_quality[variant_position] > base_quality_threshold
+                ):  # check base quality at variant
+                    # print(len(variant.samples.items()))
+                    genotype1 = variant.samples.items()[0][1].values()[
+                        0
+                    ]  # get the genotype for the first sample
+                    genotype2 = variant.samples.items()[1][1].values()[
+                        0
+                    ]  # get the genotype for the second sample
+
+                    if num_vcf_samples == 3:
+                        genotype3 = variant.samples.items()[2][1].values()[
+                            0
+                        ]  # get the genotype for the third sample
+                    else:
+                        genotype3 = (
+                            9,
+                            9,
+                        )  # dummy int interator to parse through the genotype
+
+                    # build allele/genotype lookup dictionaries
+                    dict_alleles = {}  # [0:allele]
+                    dict_genotypes = {}  # [allele:0]
+                    allele_num = 0
+
+                    for (
+                        allele
+                    ) in (
+                        variant.alleles
+                    ):  # iterate through alleles and build allele/genotype lookup dictionaries
+                        dict_alleles[allele_num] = allele
+                        dict_genotypes[allele] = allele_num
+                        allele_num += 1
+
+                    ## Variant to Read sequence matching and Variant Result Calling
+
+                    ## handle INDELS first
+                    list_indel_walk_positions = []
+                    if is_indel == True:
+                        list_index = list(
+                            read_index.keys()
+                        )  # get the read base position index
+                        start_pos = list_index.index(variant_position)
+
+                        list_possible_matches = []
+
+                        for allele in dict_alleles.values():
+                            try:
+                                list_indel_walk_positions = [
+                                    list_index[start_pos + i]
+                                    for i, x in enumerate(list(allele))
+                                ]  # construct new base positions for the indel based on allele length
+                            except:
+                                pass
+
+                            list_possible_matches.append(
+                                "".join(
+                                    [read_index[i] for i in list_indel_walk_positions]
+                                )
+                            )  # add to list of possible indel matches
+
+                        for indel_construct in sorted(
+                            list_possible_matches, key=len, reverse=True
+                        ):  # check in descending order of indel length
+                            read_sequence = "-"  # reset read sequence
+
+                            if indel_construct in dict_genotypes.keys():
+                                match_result = dict_genotypes[
+                                    indel_construct
+                                ]  # returns the allele number for the match (0,1,2,3) etc
+                                variant_confidence = 0.25 * len(
+                                    indel_construct
+                                )  # set variant confidence to 10x the length of the indel
+
+                                if (
+                                    match_result in genotype1
+                                    and match_result in genotype2
+                                ):
+                                    variant_result = "mixed locus indel 1+2"
+                                    read_sequence = indel_construct
+                                    break
+
+                                if (
+                                    match_result in genotype1
+                                    and match_result in genotype3
+                                ):
+                                    variant_result = "mixed locus indel 1+3"
+                                    read_sequence = indel_construct
+                                    break
+
+                                if (
+                                    match_result in genotype2
+                                    and match_result in genotype3
+                                ):
+                                    variant_result = "mixed locus indel 2+3"
+                                    read_sequence = indel_construct
+                                    break
+
+                                elif match_result in genotype1:
+                                    variant_result = strain1
+                                    read_sequence = indel_construct
+                                    break
+
+                                elif match_result in genotype2:
+                                    variant_result = strain2
+                                    read_sequence = indel_construct
+                                    break
+
+                                elif match_result in genotype3:
+                                    variant_result = "strain3"
+                                    read_sequence = indel_construct
+                                    break
+
+                                elif dict_alleles[match_result] in variant.ref:
+                                    variant_result = "reference"
+                                    read_sequence = indel_construct
+                                    break
+
+                                else:
+                                    variant_result = "unknown"
+                                    read_sequence = indel_construct
+                                    break
+                            else:
+                                variant_result = "incomplete indel match"  # if no match found, set variant result to incomplete match
+
+                    else:  # handle SNPs
+
+                        read_sequence = read_index[variant_position]
+
+                        if read_sequence in dict_genotypes.keys():
+                            base_genotype_at_variant = dict_genotypes[
+                                read_sequence
+                            ]  # get the genotype for the read base
+
+                            if (
+                                base_genotype_at_variant in genotype1
+                                and base_genotype_at_variant in genotype2
+                            ):
+                                variant_result = "mixed snp locus"
+                                variant_confidence += 0.25
+
+                            elif base_genotype_at_variant in genotype1:
+                                variant_result = strain1
+                                variant_confidence += 0.25
+
+                            elif base_genotype_at_variant in genotype2:
+                                variant_result = strain2
+                                variant_confidence += 0.25
+
+                            elif base_genotype_at_variant in genotype3:
+                                variant_result = "strain3"
+                                variant_confidence += 0.25
+
+                            elif dict_alleles[base_genotype_at_variant] in variant.ref:
+                                variant_result = "reference"
+                                variant_confidence += 0.25
+
+                            else:
+                                variant_result = "unknown"
+                        else:
+                            variant_result = "base not variant option"
+                else:
+                    variant_result = "base at variant low quality " + str(
+                        base_quality_threshold
+                    )
+
+                # append variant level results
+                list_read_results.append(variant_result)
+                list_variant_confidence.append(variant_confidence)
+                list_variant_refseq.append(read_sequence)
+                list_variant_alleles.append(variant.alleles)
+                list_genotype1.append(genotype1)
+                list_genotype2.append(genotype2)
+                list_genotype3.append(genotype3)
+                list_isindel.append(is_indel)
+                list_variantpos.append(variant_position)
+
+                if variant_result == "none":
+                    print(
+                        variant_result,
+                        read.reference_name,
+                        variant_position,
+                        read_sequence,
+                        variant.alleles,
+                        genotype1,
+                        genotype2,
+                        genotype3,
+                        is_indel,
+                        list_possible_matches,
+                    )
+
+            else:
+                variant_result = "variant not in read"
+
+    else:
+        read_result = "read failed MAPQ " + str(mapq_threshold)
+
+    ### Resolve Read Result
+    if variant_num > 0:
+        read_result = read_resolver(
+            list_read_results,
+            read_result,
+            list_variant_posqual,
+            list_variant_confidence,
+            mapq_threshold,
+            base_quality_threshold,
+            strain1=strain1,
+            strain2=strain2,
+        )
+
+    elif variant_num == 0 and read_result == "":
+        read_result = "no variants in read"
+
+    elif variant_num > 0 and read_result == "":
+        print(
+            read_result,
+            list_read_results,
+            list_variant_refseq,
+            list_variant_alleles,
+        )
+
+    # calculate overall read score
+    result_confidence = sum(list_variant_confidence)
+
+    ### Append results to dataframe
+    df = pd.DataFrame(
+        {
+            "read_count": read_count,
+            "read_id": read.query_name,
+            "chrom": read.reference_name,
+            "read_pos_start": read.reference_start,
+            "read_pos_end": read.reference_end,
+            "read_length": read.infer_query_length(),
+            "read_mapq": read.mapping_quality,
+            "read_result": read_result,
+            "result_confidence": result_confidence,
+            "genes": str(set(list_genes)),
+            "gene_symbols": str(set(list_symbols)),
+            "variant_num": variant_num,
+            "variant_results": str(list_read_results),
+            "variant_positions": str(list_variantpos),
+            "variant_posqual": str(list_variant_posqual),
+            "read_seq": str(list_variant_refseq),
+            "variant_alleles": str(list_variant_alleles),
+            "variant_isindel": str(list_isindel),
+            "geneotype1": str(list_genotype1),
+            "genotype2": str(list_genotype2),
+            "genotype3": str(list_genotype3),
+        },
+        index=[0],
+    )
+
+    return df
+
+
+def process_chunk(chunk):
+    """Process level processing of a chunk of reads."""
+    list_process_read_results = []
+    for read in chunk:
+        list_process_read_results.append(
+            process_read(
+                *read,
+            )
+        )
+    return pd.concat(list_process_read_results, ignore_index=True)
+
+
 ### Read Processing Function
 @app.command()
 def read_classification(
@@ -248,6 +613,7 @@ def read_classification(
     output_path: str = os.getcwd() + "/classification_results/",
     save_figures: bool = True,
     save_variants: bool = True,
+    num_cores=1,
 ):
     """Classify reads into strain specific bins based on the presence distinguishing variants."""
 
@@ -256,10 +622,10 @@ def read_classification(
     print("\nLoading reads to classify..." + bamfile_path)
     bamfile = pysam.AlignmentFile(bamfile_path, "rb")
     bamfile_name = bamfile_path.split("/")[-1].split(".")[0]
-    
-    # load variants
-    print("Loading variants..." + variantfile_path)
+    print(str(bamfile.count()) + " reads to classify")
 
+    # load variants
+    print("\nLoading variants..." + variantfile_path)
     variantfile_name = variantfile_path.split("/")[-1].split(".")[0]
     variantfile = pysam.VariantFile(variantfile_path)
     num_vcf_samples = len(str(variantfile.header).split("FORMAT\t")[1].split("\t"))
@@ -268,7 +634,6 @@ def read_classification(
     # load the strain names for plotting
     strain1 = vcf_sample_names[0].split(".")[0]
     strain2 = vcf_sample_names[1].split(".")[0]
-    
 
     print("\n")
     print("Number of samples in VCF: " + str(num_vcf_samples))
@@ -276,357 +641,79 @@ def read_classification(
         print(f"Sample {num+1}: {sample}")
 
     ### Session level stats
-    df_summary = pd.DataFrame()
+    df_results = pd.DataFrame()
     read_count = 0  # number of reads
 
-    print("\nClassifying " + bamfile_name + "...")
-
-    ### Main read parsing loop
-    for read in tqdm(bamfile.fetch()):
-        read_count += 1
-        variant_num = 0  # reset variant count
-
-        # reset read level stats
-        read_result = ""  # reset read result
-        result_confidence = -1  # confidence of read result
-        read_sequence = ""  # reset read sequence
-        genotype1 = ""  # reset genotype1
-        genotype2 = ""  # reset genotype2
-        genotype3 = ""  # reset genotype3
-
-        ### Read level data
-        list_variant_refseq = []
-        list_read_results = []
-        list_variant_alleles = []
-        list_genotype1 = []
-        list_genotype2 = []
-        list_genotype3 = []
-        list_isindel = []
-        list_genes = []
-        list_symbols = []
-        list_variantpos = []
-        list_variant_posqual = []
-        list_variant_confidence = []
-
-        if (
-            int(read.mapping_quality) > mapq_threshold
-        ):  # filter for overall read map quality # check presecense of read.qual or read.get_forward_qualities()?
-
-            # generate the read level lookup dictionaries for base position and quality
-            read_index = {}  # read base lookup dictionary
-            mapping_quality = {}  # read base level mapping quality lookup dictionary
-
-            for index, position in read.aligned_pairs:
-                if index is not None and position is not None:
-                    read_index[position] = read.seq[int(index)]
-                    mapping_quality[position] = read.get_forward_qualities()[index]
-
-            # fetch 1-base position variants found within the read sequence
-            for variant in variantfile.fetch(
-                contig=read.reference_name,
-                start=read.reference_start,
-                stop=read.reference_end,
-            ):
-
-                variant_position = variant.pos - 1  # fix the off by one error
-                variant_result = "none"  # reset result
-                variant_confidence = 0
-
-                if "INDEL" in variant.info.keys():
-                    is_indel = True
-                else:
-                    is_indel = False
-
-                if "GENE" in variant.info.keys():
-                    list_genes.append(variant.info["GENE"])
-
-                    try:
-                        list_symbols.append(
-                            dict_gene_lookup[variant.info["GENE"]]
-                        )  # translate gene name to symbol
-                    except KeyError:
-                        list_symbols.append(
-                            variant.info["GENE"]
-                        )  # if no symbol found, use gene name
-                else:
-                    list_genes.append("-")  # if no gene found in key(), use '-'
-                    list_symbols.append("-")
-
-                if variant_position in read_index.keys():
-                    variant_num += 1
-                    list_variant_posqual.append(
-                        mapping_quality[variant_position]
-                    )  # keep track of the read base quality
-
-                    if (
-                        mapping_quality[variant_position] > base_quality_threshold
-                    ):  # check base quality at variant
-                        # print(len(variant.samples.items()))
-                        genotype1 = variant.samples.items()[0][1].values()[
-                            0
-                        ]  # get the genotype for the first sample
-                        genotype2 = variant.samples.items()[1][1].values()[
-                            0
-                        ]  # get the genotype for the second sample
-
-                        if num_vcf_samples == 3:
-                            genotype3 = variant.samples.items()[2][1].values()[
-                                0
-                            ]  # get the genotype for the third sample
-                        else:
-                            genotype3 = (
-                                9,
-                                9,
-                            )  # dummy int interator to parse through the genotype
-
-                        # build allele/genotype lookup dictionaries
-                        dict_alleles = {}  # [0:allele]
-                        dict_genotypes = {}  # [allele:0]
-                        allele_num = 0
-
-                        for (
-                            allele
-                        ) in (
-                            variant.alleles
-                        ):  # iterate through alleles and build allele/genotype lookup dictionaries
-                            dict_alleles[allele_num] = allele
-                            dict_genotypes[allele] = allele_num
-                            allele_num += 1
-
-                        ## Variant to Read sequence matching and Variant Result Calling
-
-                        ## handle INDELS first
-                        list_indel_walk_positions = []
-                        if is_indel == True:
-                            list_index = list(
-                                read_index.keys()
-                            )  # get the read base position index
-                            start_pos = list_index.index(variant_position)
-
-                            list_possible_matches = []
-
-                            for allele in dict_alleles.values():
-                                try:
-                                    list_indel_walk_positions = [
-                                        list_index[start_pos + i]
-                                        for i, x in enumerate(list(allele))
-                                    ]  # construct new base positions for the indel based on allele length
-                                except:
-                                    pass
-
-                                list_possible_matches.append(
-                                    "".join(
-                                        [
-                                            read_index[i]
-                                            for i in list_indel_walk_positions
-                                        ]
-                                    )
-                                )  # add to list of possible indel matches
-
-                            for indel_construct in sorted(
-                                list_possible_matches, key=len, reverse=True
-                            ):  # check in descending order of indel length
-                                read_sequence = "-"  # reset read sequence
-
-                                if indel_construct in dict_genotypes.keys():
-                                    match_result = dict_genotypes[
-                                        indel_construct
-                                    ]  # returns the allele number for the match (0,1,2,3) etc
-                                    variant_confidence = 0.25 * len(
-                                        indel_construct
-                                    )  # set variant confidence to 10x the length of the indel
-
-                                    if (
-                                        match_result in genotype1
-                                        and match_result in genotype2
-                                    ):
-                                        variant_result = "mixed locus indel 1+2"
-                                        read_sequence = indel_construct
-                                        break
-
-                                    if (
-                                        match_result in genotype1
-                                        and match_result in genotype3
-                                    ):
-                                        variant_result = "mixed locus indel 1+3"
-                                        read_sequence = indel_construct
-                                        break
-
-                                    if (
-                                        match_result in genotype2
-                                        and match_result in genotype3
-                                    ):
-                                        variant_result = "mixed locus indel 2+3"
-                                        read_sequence = indel_construct
-                                        break
-
-                                    elif match_result in genotype1:
-                                        variant_result = strain1
-                                        read_sequence = indel_construct
-                                        break
-
-                                    elif match_result in genotype2:
-                                        variant_result = strain2
-                                        read_sequence = indel_construct
-                                        break
-
-                                    elif match_result in genotype3:
-                                        variant_result = "strain3"
-                                        read_sequence = indel_construct
-                                        break
-
-                                    elif dict_alleles[match_result] in variant.ref:
-                                        variant_result = "reference"
-                                        read_sequence = indel_construct
-                                        break
-
-                                    else:
-                                        variant_result = "unknown"
-                                        read_sequence = indel_construct
-                                        break
-                                else:
-                                    variant_result = "incomplete indel match"  # if no match found, set variant result to incomplete match
-
-                        else:  # handle SNPs
-
-                            read_sequence = read_index[variant_position]
-
-                            if read_sequence in dict_genotypes.keys():
-                                base_genotype_at_variant = dict_genotypes[
-                                    read_sequence
-                                ]  # get the genotype for the read base
-
-                                if (
-                                    base_genotype_at_variant in genotype1
-                                    and base_genotype_at_variant in genotype2
-                                ):
-                                    variant_result = "mixed snp locus"
-                                    variant_confidence += 0.25
-
-                                elif base_genotype_at_variant in genotype1:
-                                    variant_result = strain1
-                                    variant_confidence += 0.25
-
-                                elif base_genotype_at_variant in genotype2:
-                                    variant_result = strain2
-                                    variant_confidence += 0.25
-
-                                elif base_genotype_at_variant in genotype3:
-                                    variant_result = "strain3"
-                                    variant_confidence += 0.25
-
-                                elif (
-                                    dict_alleles[base_genotype_at_variant]
-                                    in variant.ref
-                                ):
-                                    variant_result = "reference"
-                                    variant_confidence += 0.25
-
-                                else:
-                                    variant_result = "unknown"
-                            else:
-                                variant_result = "base not variant option"
-                    else:
-                        variant_result = "base at variant low quality " + str(
-                            base_quality_threshold
-                        )
-
-                    # append variant level results
-                    list_read_results.append(variant_result)
-                    list_variant_confidence.append(variant_confidence)
-                    list_variant_refseq.append(read_sequence)
-                    list_variant_alleles.append(variant.alleles)
-                    list_genotype1.append(genotype1)
-                    list_genotype2.append(genotype2)
-                    list_genotype3.append(genotype3)
-                    list_isindel.append(is_indel)
-                    list_variantpos.append(variant_position)
-
-                    if variant_result == "none":
-                        print(
-                            variant_result,
-                            read.reference_name,
-                            variant_position,
-                            read_sequence,
-                            variant.alleles,
-                            genotype1,
-                            genotype2,
-                            genotype3,
-                            is_indel,
-                            list_possible_matches,
-                        )
-
-                else:
-                    variant_result = "variant not in read"
-
-        else:
-            read_result = "read failed MAPQ " + str(mapq_threshold)
-
-        ### Resolve Read Result
-        if variant_num > 0:
-            read_result = read_resolver(
-                list_read_results,
-                read_result,
-                list_variant_posqual,
-                list_variant_confidence,
+    print("\nSerializing Reads...")
+    # Generated iterator
+    list_bamreads = []
+    bamfile_iter = bamfile.fetch(multiple_iterators=True)
+    for index, read in enumerate(bamfile_iter):
+        list_bamreads.append(
+            (
+                (read.to_string()),
+                bamfile.header.to_dict(),
+                variantfile_path,
                 mapq_threshold,
                 base_quality_threshold,
-                strain1=strain1,
-                strain2=strain2
+                strain1,
+                strain2,
+                index,
             )
-
-        elif variant_num == 0 and read_result == "":
-            read_result = "no variants in read"
-
-        elif variant_num > 0 and read_result == "":
-            print(
-                read_result,
-                list_read_results,
-                list_variant_refseq,
-                list_variant_alleles,
-            )
-
-        # calculate overall read score
-        result_confidence = sum(list_variant_confidence)
-
-        ## Split the reads into multiple bam files based on the read result
-
-        ### Append results to dataframe
-        df2 = pd.DataFrame(
-            {
-                "read_count": read_count,
-                "read_id": read.query_name,
-                "chrom": read.reference_name,
-                "read_pos_start": read.reference_start,
-                "read_pos_end": read.reference_end,
-                "read_length": read.infer_query_length(),
-                "read_mapq": read.mapping_quality,
-                "read_result": read_result,
-                "result_confidence": result_confidence,
-                "genes": str(set(list_genes)),
-                "gene_symbols": str(set(list_symbols)),
-                "variant_num": variant_num,
-                "variant_results": str(list_read_results),
-                "variant_positions": str(list_variantpos),
-                "variant_posqual": str(list_variant_posqual),
-                "read_seq": str(list_variant_refseq),
-                "variant_alleles": str(list_variant_alleles),
-                "variant_isindel": str(list_isindel),
-                "geneotype1": str(list_genotype1),
-                "genotype2": str(list_genotype2),
-                "genotype3": str(list_genotype3),
-            },
-            index=[0],
         )
 
-        df_summary = pd.concat((df_summary, df2), ignore_index=True)
-
     bamfile.close()
+
+    ### Chunnk data for sending to multiprocessing
+    list_chunks = []
+
+    # Check available cores
+    if num_cores > 1:
+        if num_cores > multiprocessing.cpu_count():
+            print(
+                f"\nNumber of cores specified is greater than available cores. Using all available cores: {multiprocessing.cpu_count()}"
+            )
+            num_cores = multiprocessing.cpu_count()
+
+    if num_cores > 1:
+        num_reads = len(list_bamreads)
+        chunk_size = int(num_reads / num_cores)
+        remainder = num_reads % num_cores
+
+        current_index = 0
+        for i in range(num_cores):
+            if i < num_cores - 1:
+                list_chunks.append(
+                    list_bamreads[current_index : current_index + chunk_size]
+                )
+            elif i == num_cores - 1:
+                list_chunks.append(
+                    list_bamreads[
+                        current_index : current_index + chunk_size + remainder
+                    ]
+                )
+
+            current_index += chunk_size
+    elif num_cores == 1:
+        list_chunks.append(list_bamreads[:])
+
+    print("\nClassifying " + bamfile_name + "...")
+    ### Read processing with multiprocessing
+    with Pool(num_cores) as mp_pool:
+        map_results = mp_pool.map(
+            process_chunk,
+            list_chunks,
+        )
+
+    print("\nFinished processing reads.")
     variantfile.close()
 
-    print("\nTotal reads classified:", sum(df_summary.read_result.value_counts()))
+    print("\nConcatenating results...")
+    df_results = pd.concat(map_results, ignore_index=True)
+
+    print("\nTotal reads classified:", sum(df_results.read_result.value_counts()))
     print("\nBins:")
-    print(df_summary.read_result.value_counts())
+    print(df_results.read_result.value_counts())
 
     ### Outputs
     try:
@@ -637,51 +724,52 @@ def read_classification(
     ### Save to CSV
     if save_variants:
         print("\nSaving..." + bamfile_name + ".csv")
-        df_summary.to_csv(output_path + bamfile_name + "_" + variantfile_name + ".csv")  # save to CSV
+        df_results.to_csv(
+            output_path + bamfile_name + "_" + variantfile_name + ".csv"
+        )  # save to CSV
 
     ### Save figure image
     if save_figures:
         print("\nSaving..." + bamfile_name + ".png")
-        plot = df_summary.read_result.value_counts().plot(
-            kind="bar", title="Reads Classified: " + bamfile_name + "\nVariants:" + variantfile_name
+        plot = df_results.read_result.value_counts().plot(
+            kind="bar",
+            title="Reads Classified: "
+            + bamfile_name
+            + "\nVariants:"
+            + variantfile_name,
         )
         plot.figure.savefig(
-            output_path + bamfile_name + "_" + variantfile_name + ".png", bbox_inches="tight"
+            output_path + bamfile_name + "_" + variantfile_name + ".png",
+            bbox_inches="tight",
         )  # save to PNG
 
 
 if __name__ == "__main__":
 
-    # 
-    variantfile_path = "vcfs/variant_calls_3strains_annotated_exons.vcf.gz"
+    import time
 
-    bamfile_path1 = "bams/cantons_sorted_subset.bam"
-    bamfile_path2 = "bams/orer_sorted_subset.bam"
-    bamfile_path3 = "bams/w1118_0-1replicate1_040121_subset.bam"
+    start_time = time.time()
 
-    bamfile = bamfile_path3
-    bamfile_name = bamfile.split("/")[-1].split(".")[0]
+    # Development Testing
+    variantfile_path = os.getcwd() + "/test_data/variant-calls-cantons-w1118.bcf"
 
-    ## gene database lookup
-    genedb = pd.read_csv("refs/pantherGeneList.txt", sep="\t", header=None)
-    dict_gene_lookup = {}
-    for gene in genedb.iterrows():
-        dict_gene_lookup[gene[1][0].split("|")[1].split("=")[1]] = gene[1][1].strip(
-            ";ortholog"
-        )
-
-    ### Read Sorting Function Testing
-    read_classification(bamfile, variantfile_path, dict_gene_lookup)
-
-    df_readcalls = pd.read_csv(bamfile + ".csv")
-
-    print("\nTotal reads sorted:", sum(df_readcalls.read_result.value_counts()))
-    print("\nBins:")
-    print(df_readcalls.read_result.value_counts())
-
-    df_readcalls.read_result.value_counts().plot(
-        kind="bar", title="Reads Classified: " + bamfile_name
+    bamfile_path = (
+        os.getcwd() + "/test_data/w1118_0-1replicate2_040121_subset_sorted.bam"
     )
-    plt.xticks(rotation=45)
-    plt.savefig(bamfile_name + "_read_results.png")
-    plt.show()
+
+    # ## gene database lookup
+    # genedb = pd.read_csv("refs/pantherGeneList.txt", sep="\t", header=None)
+    # dict_gene_lookup = {}
+    # for gene in genedb.iterrows():
+    #     dict_gene_lookup[gene[1][0].split("|")[1].split("=")[1]] = gene[1][1].strip(
+    #         ";ortholog"
+    #     )
+
+    read_classification(
+        bamfile_path,
+        variantfile_path,
+        save_figures=True,
+        save_variants=True,
+        num_cores=10,
+    )
+    print(f"--- {(time.time() - start_time)/60} minutes ---")
